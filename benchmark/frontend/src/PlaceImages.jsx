@@ -1,0 +1,10 @@
+import React,{useEffect,useState} from 'react';
+import {ImageOff,Expand,ChevronLeft,ChevronRight} from 'lucide-react';
+
+export default function PlaceImages({place,datasetId}){
+ const [images,setImages]=useState(place.images||[]),[selected,setSelected]=useState(0),[failed,setFailed]=useState([]),[loading,setLoading]=useState(true);
+ useEffect(()=>{let current=true;setImages(place.images||[]);setSelected(0);setFailed([]);setLoading(true);if(place.images?.length||!datasetId){setLoading(false);return()=>{current=false;};}fetch('/api/place-images?'+new URLSearchParams({dataset_id:datasetId,place_id:place.place_id})).then(r=>r.ok?r.json():{images:[]}).then(data=>{if(current)setImages(data.images||[]);}).catch(()=>{}).finally(()=>{if(current)setLoading(false);});return()=>{current=false;};},[place.place_id,datasetId,place.images]);
+ const available=images.map((image,index)=>({image,index})).filter(({index})=>!failed.includes(index));
+ const active=available.find(v=>v.index===selected)||available[0];
+ return <div className="compact-gallery">{active?<><a className="compact-photo" href={active.image.url} target="_blank" rel="noreferrer" title="Mở ảnh đầy đủ"><img key={active.image.id} src={active.image.url} loading="lazy" alt={place.name||'Ảnh địa điểm'} onError={()=>setFailed(current=>[...current,active.index])}/><span className="photo-expand"><Expand size={13}/></span></a><span className="photo-counter">{available.findIndex(v=>v.index===active.index)+1}/{available.length}</span>{available.length>1&&<div className="compact-photo-nav"><button type="button" aria-label="Ảnh trước" onClick={()=>{const at=available.findIndex(v=>v.index===active.index);setSelected(available[(at-1+available.length)%available.length].index);}}><ChevronLeft size={16}/></button><button type="button" aria-label="Ảnh sau" onClick={()=>{const at=available.findIndex(v=>v.index===active.index);setSelected(available[(at+1)%available.length].index);}}><ChevronRight size={16}/></button></div>}</>:<div className="compact-photo-empty"><ImageOff size={25}/><span>{loading?'Đang tải ảnh…':images.length?'Ảnh nguồn không khả dụng':'Chưa có ảnh'}</span></div>}</div>;
+}

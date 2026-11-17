@@ -1,0 +1,7 @@
+[
+  {"model":"handcrafted","groups":["hsv"],"weights":{"hsv":1},"collection":"tourism"},
+  {"model":"handcrafted","groups":["hsv","lbp"],"weights":{"hsv":1,"lbp":1},"collection":"tourism"},
+  {"model":"handcrafted","groups":["hsv","lbp","glcm"],"weights":{"hsv":1,"lbp":1,"glcm":1},"collection":"tourism"},
+  {"model":"handcrafted","groups":["hsv","lbp","glcm","hog"],"weights":{"hsv":1,"lbp":1,"glcm":1,"hog":1},"collection":"tourism"},
+  {"model":"handcrafted","groups":["hsv","lbp","glcm","hog","canny"],"weights":{"hsv":1,"lbp":1,"glcm":1,"hog":1,"canny":1},"collection":"tourism"}
+]

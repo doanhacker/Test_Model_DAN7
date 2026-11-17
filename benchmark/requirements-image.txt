@@ -1,0 +1,9 @@
+-r requirements.txt
+# Match the Qdrant 1.15.x server bundled in compose.yaml.
+qdrant-client>=1.15,<1.17
+torch>=2.6,<3
+torchvision>=0.21,<1
+transformers>=4.48,<6
+Pillow>=11,<13
+opencv-python>=4.10,<5
+scikit-image>=0.25,<1
