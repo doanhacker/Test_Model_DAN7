@@ -1,5 +1,22 @@
 # Image-to-Image Search — PA1, PA2, PA3, PA4
 
+Hướng dẫn PA1 đầy đủ, ablation, dữ liệu đã kiểm tra và các nhãn còn cần xác nhận: [PA1_IMAGE_SEARCH.md](PA1_IMAGE_SEARCH.md).
+
+Hướng dẫn PA2 CNN, Gallery chung và ba checkpoint pretrained: [PA2_CNN_IMAGE_SEARCH.md](PA2_CNN_IMAGE_SEARCH.md).
+
+## Giao diện bốn màn hình
+
+Mở `/image-search` sau khi chạy `npm.cmd run build` trong thư mục `frontend`.
+
+- **Tìm kiếm ảnh**: chọn ảnh từ máy hoặc Query đã lưu, chọn image index và Top-K; hiển thị ảnh kết quả, cosine, thời gian nạp model / embedding / search và RAM.
+- **Vector đặc trưng**: chọn ảnh và model để mã hóa thực, hoặc đọc đúng vector đã lưu trong Qdrant. Hiển thị từng chiều (đánh số từ 0), biểu đồ từng vùng 128 chiều, L2 norm, min/max/mean/std và cấu hình checkpoint. Lịch sử lưu PostgreSQL trong group `image_features`.
+- **Dữ liệu ảnh**: duyệt database địa điểm theo trang, chọn ảnh đại diện để import vào Gallery, hoặc upload ảnh gắn `place_id`. Chọn Gallery và model để index qua hàng đợi. Không cần viết metadata JSON. Ảnh từ database là cache tối đa 960×640, được ghi rõ trên giao diện; lỗi nguồn không thay bằng ảnh giả.
+- **Đánh giá truy vấn test**: tạo bộ test bằng form, upload ảnh Query độc lập, khai báo Exact Place và gán nhãn thị giác 0–3 riêng. Xác nhận nhãn trước khi lưu phiên bản. Chạy cùng Gallery qua nhiều model, xem metric tổng hợp và từng truy vấn/lần lặp, Top-K bằng ảnh và lịch sử run. Visual có Recall@10, MRR@10, nDCG@10, Precision@10; Exact có Recall@1/5 và MRR@10. Latency và RAM hiển thị trực tiếp.
+
+Bản nháp nhãn lưu trong trình duyệt; bản đã xác nhận và run lưu PostgreSQL. Query trùng pixel Gallery bị backend chặn. Nhãn trống không phải 0. Chế độ chính thức báo số nhãn còn thiếu; thăm dò giữ giá trị chưa đủ nhãn là null theo điều kiện từng metric.
+
+API vector bổ sung: `POST /api/ai/images/features` nhận `{image_id, config}` và trả job; `GET /features`, `GET /features/{id}` đọc lịch sử; `GET /indexes/{index_id}/vectors/{image_id}` đọc vector Qdrant. Các đường dẫn sau cùng đều có prefix `/api/ai/images`.
+
 Cập nhật lưu trữ: `backend.data` hiện dùng PostgreSQL cho metadata, manifest và lịch sử run thay JSON rời. Ảnh và model cache vẫn là file. Các API ảnh giữ nguyên; xem [DATABASE.md](DATABASE.md).
 
 ## Khảo sát và phạm vi thay đổi
@@ -138,7 +155,7 @@ Visual task: nDCG@10 theo gain 2^rel−1; Precision@10 và Recall@10 theo thresh
 
 Để gộp địa điểm chính xác khi có nhiều ảnh, hiện truy xuất toàn bộ image hits rồi lấy max cosine cho mỗi place. Điều này tốn chi phí O(Gallery) kết quả; là baseline đúng về thứ hạng, chưa phải tối ưu production. `visual_target=image` truy xuất Top10 image hits trực tiếp. Vì hai mục tiêu có pipeline khác, timing được lưu riêng theo objective.
 
-Các collection phải chứa đúng cùng bộ Gallery image_ids như manifest; mọi query, GT, K và thiết bị đo dùng cùng protocol. Benchmark chạy sequential exact Qdrant để loại sai số ANN, cold sample và warm-up nằm ngoài warm latency. Phần decode đọc canonical PNG; `total_ms` gồm decode, model load nếu có, preprocessing, embedding, Qdrant round-trip và collapse. Không tính thời gian upload HTTP hoặc thời gian chờ queue. RAM là RSS tiến trình, VRAM là torch allocated, peak toàn run lấy mẫu 100 ms; đây không phải peak GPU toàn hệ thống. `vector_bytes=count×dimension×4` là float32 vector payload, không phải dung lượng HNSW/payload/disk tổng. Không tự tuyên bố model tốt nhất trước khi có dataset và run thực tế.
+Các collection phải chứa đúng cùng bộ Gallery image_ids như manifest; mọi query, GT, K và thiết bị đo dùng cùng protocol. Benchmark chạy sequential exact Qdrant để loại sai số ANN, cold sample và warm-up nằm ngoài warm latency. Phần decode đọc canonical PNG; `total_ms` gồm decode, model load nếu có, preprocessing, embedding, Qdrant round-trip và collapse. Không tính thời gian upload HTTP hoặc thời gian chờ queue. RAM là RSS tiến trình Python; peak toàn run lấy mẫu 100 ms, không bao gồm Qdrant/PostgreSQL. `vector_bytes=count×dimension×4` là float32 vector payload, không phải dung lượng HNSW/payload/disk tổng. Không tự tuyên bố model tốt nhất trước khi có dataset và run thực tế.
 
 ## Kiểm thử và giới hạn
 

@@ -61,7 +61,7 @@ def submit(kind, function):
 
 
 def recover():
-    for group in ('image_indexes','image_runs'):
+    for group in ('image_indexes','image_runs','image_imports'):
         for value in data.listing(group):
             if value['status'] in ('building','running'):
                 value.update(status='interrupted',error='Server restarted during image task; rerun required.')

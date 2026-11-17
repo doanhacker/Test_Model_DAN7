@@ -1,0 +1,12 @@
+import React,{useState} from 'react';
+import {ResponsiveContainer,BarChart,Bar,XAxis,YAxis,CartesianGrid,Tooltip,Legend} from 'recharts';
+
+export default function PA1Comparison({run}){
+ const [objective,setObjective]=useState('visual');
+ const selected=run.summary.some(s=>s.objective===objective)?objective:run.summary[0]?.objective;
+ const rows=run.summary.filter(s=>s.objective===selected).map(s=>{const i=run.indexes.find(i=>i.id===s.index_id);return {name:i?.config.model==='handcrafted'?i.config.groups.map(g=>g.toUpperCase()).join('+'):s.model,
+  objective:s.objective,Recall:s['recall@10']??s['recall@5'],MRR:s['mrr@10'],nDCG:s['ndcg@10'],Latency:s.average_ms,P95:s.p95_ms};});
+ const quality=rows.some(r=>r.Recall!=null||r.MRR!=null||r.nDCG!=null);
+ if(!rows.length)return null;
+ return <div className="il-comparison"><h3>So sánh các cấu hình trên cùng bộ test</h3><label>Mục tiêu của biểu đồ<select value={selected} onChange={e=>setObjective(e.target.value)}>{[...new Set(run.summary.map(s=>s.objective))].map(o=><option key={o} value={o}>{o==='visual'?'Visual Similarity':'Exact Place'}</option>)}</select></label><div className="il-two"><div><h3>Latency · ms</h3><ResponsiveContainer width="100%" height={Math.max(220,rows.length*42)}><BarChart data={rows} layout="vertical" margin={{left:5,right:12}}><CartesianGrid strokeDasharray="3 3" horizontal={false}/><XAxis type="number"/><YAxis type="category" dataKey="name" width={130} tick={{fontSize:9}}/><Tooltip/><Legend/><Bar dataKey="Latency" fill="#258b77" isAnimationActive={false}/><Bar dataKey="P95" fill="#a4c9c2" isAnimationActive={false}/></BarChart></ResponsiveContainer></div><div><h3>Chất lượng truy xuất</h3>{quality?<ResponsiveContainer width="100%" height={Math.max(220,rows.length*42)}><BarChart data={rows} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false}/><XAxis type="number" domain={[0,1]}/><YAxis type="category" dataKey="name" width={130} tick={{fontSize:9}}/><Tooltip/><Legend/><Bar dataKey="Recall" fill="#258b77" isAnimationActive={false}/><Bar dataKey="MRR" fill="#7ba6c6" isAnimationActive={false}/><Bar dataKey="nDCG" fill="#b6a0ce" isAnimationActive={false}/></BarChart></ResponsiveContainer>:<div className="il-empty"><p>Chưa đủ nhãn để vẽ biểu đồ chất lượng.</p><small>Thời gian bên trái được đo thực tế. Không thay metric thiếu nhãn bằng 0.</small></div>}</div></div><p className="il-note">Exact hiển thị Recall@5, MRR@10; Visual hiển thị Recall@10, MRR@10, nDCG@10. Xem từng model / mục tiêu bên dưới để đối chiếu chi tiết.</p></div>;
+}

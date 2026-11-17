@@ -13,9 +13,9 @@ from .. import data
 GROUPS = ['hsv', 'lbp', 'glcm', 'hog', 'canny']
 MODELS = {
     'handcrafted': dict(family='PA1', checkpoint='handcrafted-v1', dimension=None),
-    'mobilenet_v3_large': dict(family='PA2', checkpoint='MobileNet_V3_Large_Weights.IMAGENET1K_V2', dimension=960),
-    'resnet50': dict(family='PA2', checkpoint='ResNet50_Weights.IMAGENET1K_V2', dimension=2048),
-    'efficientnet_b0': dict(family='PA2', checkpoint='EfficientNet_B0_Weights.IMAGENET1K_V1', dimension=1280),
+    'mobilenet_v3_large': dict(family='PA2', checkpoint='MobileNet_V3_Large_Weights.IMAGENET1K_V2', dimension=960,pretrained_parameters=5483032),
+    'resnet50': dict(family='PA2', checkpoint='ResNet50_Weights.IMAGENET1K_V2', dimension=2048,pretrained_parameters=25557032),
+    'efficientnet_b0': dict(family='PA2', checkpoint='EfficientNet_B0_Weights.IMAGENET1K_V1', dimension=1280,pretrained_parameters=5288548),
     'dinov2_small': dict(family='PA3', checkpoint='facebook/dinov2-small', dimension=384),
     'dinov2_base': dict(family='PA3', checkpoint='facebook/dinov2-base', dimension=768),
     'dinov2_large': dict(family='PA3', checkpoint='facebook/dinov2-large', dimension=1024),
@@ -106,6 +106,8 @@ class EncoderManager:
                 device = ('cuda' if torch.cuda.is_available() else 'cpu') if config.device == 'auto' else config.device
                 if device == 'cuda' and not torch.cuda.is_available():
                     raise ValueError('CUDA unavailable')
+                if device=='cpu':
+                    torch.set_num_threads(max(1,min(int(os.getenv('IMAGE_CPU_THREADS','4')),os.cpu_count() or 1)))
                 if spec['family'] == 'PA2':
                     from torchvision import models
                     enum_class, member = spec['checkpoint'].split('.')
@@ -140,6 +142,9 @@ class EncoderManager:
                 self.info = dict(spec, revision=resolved, device=device, preprocessing=processor_info,
                                  gpu=torch.cuda.get_device_name() if device == 'cuda' else None,
                                  pooling='CLS' if spec['family']=='PA3' else 'projected image embedding' if spec['family']=='PA4' else 'global average pool before classifier', normalize='L2')
+                self.info.update(feature_parameters=sum(p.numel() for p in self.model.parameters()),
+                                 frozen=not any(p.requires_grad for p in self.model.parameters()),
+                                 cpu_threads=torch.get_num_threads())
             self.info['libraries']={name:importlib.metadata.version(name) for name in ('torch','torchvision','transformers','Pillow','scikit-image')}
             self.key = key
             return (time.perf_counter() - start) * 1000

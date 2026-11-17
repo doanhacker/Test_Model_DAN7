@@ -14,9 +14,9 @@ from PIL import Image, ImageDraw
 from fastapi.testclient import TestClient
 from qdrant_client import QdrantClient
 
-from backend import data
+from backend import data, database
 from backend.main import app
-from backend.images import benchmark, encoders, service, store
+from backend.images import benchmark, encoders, service, store, features, pa1, importer, cnn
 
 
 def fixture(color,pattern=0):
@@ -51,6 +51,124 @@ class ImageTests(unittest.TestCase):
         self.client_patch.stop()
         self.root_patch.stop()
         self.temp.cleanup()
+
+    def test_inspect_actual_encoder_and_qdrant_vectors(self):
+        asset=store.register(fixture('blue',3),'p1')
+        cfg=service.IndexConfig(model='handcrafted',device='cpu',batch_size=1)
+        encoded=features.extract(asset['id'],cfg,Job())
+        built=service.index_images(cfg,[asset['id']],Job())
+        indexed=features.indexed(built['index_id'],asset['id'])
+        self.assertEqual(encoded['dimension'],2014)
+        self.assertEqual(indexed['source'],'qdrant')
+        self.assertAlmostEqual(indexed['statistics']['l2_norm'],1,places=5)
+        np.testing.assert_allclose(encoded['vector'],indexed['vector'],atol=1e-6)
+        self.assertEqual(data.get('image_features',encoded['id'])['image_id'],asset['id'])
+        with self.assertRaises(ValueError):
+            features.indexed(built['index_id'],'0'*32)
+
+    def test_cnn_gallery_snapshot_is_bounded_and_independent(self):
+        a,b,c,q=self.seed()
+        extra=store.register(fixture('blue',7),'p1')
+        source=service.index_images(service.IndexConfig(),[a['id'],b['id'],c['id'],extra['id']],Job())['metadata']
+        ids=cnn.select_gallery(source)
+        self.assertEqual(len(ids),3)
+        snapshot=cnn.snapshot_baseline(source,ids,'cnn-fixture',Job())
+        self.assertEqual(snapshot['indexed_count'],3)
+        self.assertEqual(snapshot['gallery_sha256'],data.digest(sorted(ids)))
+        self.assertEqual(len(data.get('image_indexes',source['id'])['images']),4)
+        client=service.retrieval.qclient()
+        try:
+            old=client.retrieve(source['id'],ids=[str(uuid.UUID(ids[0]))],with_vectors=True)[0]
+            new=client.retrieve(snapshot['id'],ids=[str(uuid.UUID(ids[0]))],with_vectors=True)[0]
+            np.testing.assert_allclose(old.vector,new.vector,atol=1e-6)
+        finally:
+            client.close()
+
+    def test_pa1_blocks_previews_and_score_decomposition(self):
+        image=store.decode(fixture('blue',3))
+        cfg=encoders.EncoderConfig(weights={'hsv':2,'lbp':0,'glcm':1,'hog':1,'canny':1})
+        a=encoders.handcrafted(image,cfg)
+        b=encoders.handcrafted(store.decode(fixture('green',8)),cfg)
+        blocks=pa1.blocks(a,cfg.model_dump())
+        self.assertEqual([x['dimension'] for x in blocks],[128,10,48,1764,64])
+        self.assertAlmostEqual(sum(x['energy_share'] for x in blocks),1,places=6)
+        self.assertEqual(blocks[1]['energy_share'],0)
+        explained=pa1.explain(a,b,cfg.model_dump())
+        self.assertAlmostEqual(sum(x['contribution'] for x in explained),float(np.dot(a,b)),places=6)
+        self.assertIsNone(explained[1]['cosine'])
+        for kind in ('rgb','gray','lbp','glcm','hog','canny'):
+            with Image.open(io.BytesIO(pa1.preview(image,kind))) as output:
+                self.assertEqual(output.size,(256,256))
+        with self.assertRaises(ValueError):
+            pa1.preview(image,'unknown')
+
+    def test_pa1_rebuilds_missing_physical_collection(self):
+        a,b,c,q=self.seed()
+        cfg=service.IndexConfig(groups=['hsv'])
+        built=service.index_images(cfg,[a['id'],c['id']],Job())
+        client=service.retrieval.qclient()
+        client.delete_collection(built['index_id'])
+        client.close()
+        recovered=service.index_images(cfg,[a['id']],Job())
+        self.assertEqual(recovered['metadata']['indexed_count'],2)
+        result=service.search_bytes(built['index_id'],fixture('blue',3),10)
+        self.assertEqual(len(result['results']),2)
+        for row in result['results']:
+            self.assertAlmostEqual(sum(x['contribution'] for x in row['feature_scores']),row['score'],places=5)
+
+    def test_evaluate_one_test_query_with_trace(self):
+        a,b,c,q=self.seed()
+        second=store.register(fixture('orange',9))
+        ds=benchmark.create_dataset(benchmark.Dataset(gallery_image_ids=[a['id'],c['id']],
+            queries=[benchmark.Query(query_id='q1',image_id=q['id']),benchmark.Query(query_id='q2',image_id=second['id'])],
+            judgments=[benchmark.Judgment(query_id='q1',target_id='p1',relevance=3),benchmark.Judgment(query_id='q1',target_id='p2',relevance=0)]))
+        index=service.index_images(service.IndexConfig(groups=['hsv']),ds['gallery_image_ids'],Job())
+        cfg=benchmark.Config(dataset_id=ds['id'],index_ids=[index['index_id']],objective='visual',repeats=1,warmup=0)
+        with self.assertRaises(ValueError):
+            benchmark.validate(cfg)
+        single=cfg.model_copy(update={'query_ids':['q1']})
+        result=data.get('image_runs',benchmark.run(single,Job())['image_run_id'])
+        self.assertEqual(len(result['detail']),1)
+        self.assertEqual(result['summary'][0]['mrr@10'],1)
+        self.assertEqual(result['detail'][0]['query_id'],'q1')
+        self.assertEqual(len(result['detail'][0]['evaluation_trace']),2)
+        with self.assertRaises(ValueError):
+            benchmark.validate(cfg.model_copy(update={'query_ids':['missing']}))
+
+    def test_pa1_ablation_api_same_gallery(self):
+        a,b,c,q=self.seed()
+        with TestClient(app) as client:
+            response=client.post('/api/ai/images/ablation',json={'image_ids':[a['id'],c['id']],
+                                                             'config':{'model':'handcrafted','device':'cpu'}})
+            self.assertEqual(response.status_code,200,response.text)
+            job=self.wait(client,response.json()['id'])
+            self.assertEqual(job['status'],'completed',job)
+            indexes=job['result']['indexes']
+            self.assertEqual(len(indexes),5)
+            values=[data.get('image_indexes',i['index_id']) for i in indexes]
+            self.assertEqual([i['dimension'] for i in values],[128,138,186,1950,2014])
+            self.assertEqual(len({i['gallery_sha256'] for i in values}),1)
+            self.assertTrue(all(i['indexed_count']==2 for i in values))
+
+    def test_source_import_replay_and_error_report(self):
+        ds=data.import_records('places',[dict(place_id='p1',name='Import fixture'),dict(place_id='p2',name='Broken fixture')],'fixture')
+        with database.session(data.ROOT,data.db_path_override()) as conn:
+            for n,pid in enumerate(('p1','p2')):
+                conn.execute('''INSERT INTO place_images(image_id,dataset_id,place_id,source_url,url_sha256,is_cover,ordinal,source_filename,source_sheet,source_row)
+                                VALUES(?,?,?,?,?,?,?,?,?,?)''',(str(n+1)*32,ds['id'],pid,'https://lh3.googleusercontent.com/fixture-'+pid,str(n)*64,True,n,'fixture.xlsx','fixture',n+2))
+        def content(identity):
+            if identity=='2'*32:
+                raise ValueError('source unavailable')
+            from fastapi.responses import Response
+            return Response(fixture('blue',3),media_type='image/png')
+        with patch.object(importer.place_media,'image_content',side_effect=content) as source:
+            first=importer.import_photos(ds['id'],None,10,False,Job())
+            self.assertEqual((first['imported'],first['failed']),(1,1))
+            replay=importer.import_photos(ds['id'],['p1'],10,False,Job())
+            self.assertEqual((replay['imported'],replay['reused']),(0,1))
+            self.assertEqual(first['image_ids'],replay['image_ids'])
+            self.assertEqual(source.call_count,2)
+        self.assertEqual(data.get('image_imports',first['id'])['errors'][0]['place_id'],'p2')
 
     def test_bad_images_and_dedup_pixel_content(self):
         for raw in (b'',b'bad image'):

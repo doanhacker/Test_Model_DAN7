@@ -22,6 +22,8 @@ class Judgment(BaseModel):
     query_id: str
     target_id: str
     relevance: int = Field(ge=0,le=3,strict=True)
+    reason:str=''
+    review_status:Literal['confirmed']='confirmed'
 
 
 class Dataset(BaseModel):
@@ -77,10 +79,17 @@ class Config(BaseModel):
     warmup: int = Field(default=1,ge=0,le=20)
     threshold: int = Field(default=1,ge=1,le=3)
     official: bool = True
+    query_ids: list[str] | None = Field(default=None,min_length=1)
 
 
 def validate(config):
     ds=data.get('image_datasets',config.dataset_id)
+    if config.query_ids is not None:
+        selected=set(config.query_ids)
+        if len(selected)!=len(config.query_ids) or selected-{q['query_id'] for q in ds['queries']}:
+            raise ValueError('Truy vấn test không tồn tại hoặc bị chọn trùng')
+        ds={**ds,'queries':[q for q in ds['queries'] if q['query_id'] in selected],
+            'judgments':[j for j in ds['judgments'] if j['query_id'] in selected]}
     indexes=[data.get('image_indexes',key) for key in config.index_ids]
     if len(set(config.index_ids))!=len(indexes):
         raise ValueError('Duplicate index')
@@ -93,7 +102,8 @@ def validate(config):
     if config.objective in ('exact','both') and any(not q['exact_place_ids'] for q in ds['queries']):
         raise ValueError('Exact retrieval requires explicit exact_place_ids for every query')
     if config.objective in ('visual','both') and config.official and any(set(labels[q['query_id']])!=targets for q in ds['queries']):
-        raise ValueError('Official visual evaluation requires explicit labels for every query/target; missing is not zero')
+        missing=sum(len(targets-set(labels[q['query_id']])) for q in ds['queries'])
+        raise ValueError(f'Visual chính thức còn thiếu {missing} nhãn query/target đã xác nhận. Nhãn trống không phải 0; hãy gán thêm hoặc chọn chế độ thăm dò.')
     return ds,indexes,targets,labels
 
 
@@ -152,7 +162,11 @@ def run(config,job):
                                      'mrr@10':evaluate_query(ranking,exact_labels,corpus,k=10)['mrr'], 'status':'official'}
                         else:
                             values=evaluate_query(ranking,labels[query['query_id']],targets,k=10,threshold=config.threshold,official=config.official)
-                            metrics={'ndcg@10':values['ndcg'],'precision@10':values['precision'],'recall@10':values['recall'],'status':values['status'],'coverage':values['coverage']}
+                            metrics={'ndcg@10':values['ndcg'],'mrr@10':values['mrr'],'precision@10':values['precision'],'recall@10':values['recall'],'status':values['status'],'coverage':values['coverage'],
+                                     'missing_top_k':values['missing_top_k'],'missing_corpus':values['missing_corpus'],
+                                     'evaluation_trace':values['trace'],'known_relevant':values['known_relevant'],
+                                     'hits_at_k':values['hits_at_k'],'first_relevant_rank':values['first_relevant_rank'],
+                                     'dcg':values['dcg'],'idcg':values['idcg']}
                         record=dict(index_id=index['id'],model=index['config']['model'],objective=objective,repeat=repeat+1,query_id=query['query_id'],**metrics,**answer['timing'],**answer['resources'])
                         result['detail'].append(record)
                         result['samples'].append(dict(query_id=query['query_id'],objective=objective,repeat=repeat+1,**answer))
@@ -162,7 +176,7 @@ def run(config,job):
                 summary=dict(index_id=index['id'],model=index['config']['model'],objective=objective,samples=len(rows),
                              dimension=index['dimension'],vector_bytes=index['vector_bytes'],model_loading_ms=cold['timing']['model_loading_ms'],
                              **latency_summary([r['total_ms'] for r in rows]))
-                for field in (['recall@1','recall@5','mrr@10'] if objective=='exact' else ['ndcg@10','precision@10','recall@10'])+['embedding_ms','preprocessing_ms','search_ms','ram_mb']:
+                for field in (['recall@1','recall@5','mrr@10'] if objective=='exact' else ['ndcg@10','mrr@10','precision@10','recall@10'])+['embedding_ms','preprocessing_ms','search_ms','ram_mb']:
                     values=[r[field] for r in rows if r.get(field) is not None]
                     summary[field]=float(np.mean(values)) if values else None
                     summary[field+'_samples']=len(values)

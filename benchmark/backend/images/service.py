@@ -7,7 +7,7 @@ from pydantic import Field
 from qdrant_client import models as qm
 
 from .. import data, retrieval
-from . import encoders, store
+from . import encoders, store, pa1
 
 
 class IndexConfig(encoders.EncoderConfig):
@@ -54,7 +54,14 @@ def index_images(config, image_ids, job):
                             embedding_ms=0.,preprocessing_ms=0.,model_loading_ms=loading_ms,
                             environment=retrieval.environment())
             old_ids = set(meta['images'])
-            pending = [a for a in assets if a['id'] not in old_ids]
+            exists=client.collection_exists(key)
+            physical_count=client.count(key,exact=True).count if exists else 0
+            if physical_count!=len(old_ids):
+                # Recover missing points from immutable assets rather than mark a
+                # disappeared/partial physical collection as ready on replay.
+                pending=list({**meta['images'],**{a['id']:a for a in assets}}.values())
+            else:
+                pending = [a for a in assets if a['id'] not in old_ids]
             # Persist intent before upserts. Failed/partial collections cannot be searched.
             meta['status']='building'
             data.save('image_indexes',key,meta)
@@ -81,6 +88,10 @@ def index_images(config, image_ids, job):
                 data.save('image_indexes',key,meta)
                 job.update(min(offset+cfg.batch_size,len(pending)),len(pending),'Đã index ảnh '+cfg.model)
             job.check()
+            meta['indexed_count']=client.count(key,exact=True).count
+            if meta['indexed_count']!=len(meta['images']):
+                raise ValueError('Số vector Qdrant không khớp Gallery; cần kiểm tra / chạy lại indexing')
+            meta.pop('error',None)
             meta.update(status='ready',updated_at=data.now(),gallery_sha256=data.digest(sorted(meta['images'])),
                         vector_bytes=len(meta['images'])*(meta['dimension'] or 0)*4,
                         storage_note='float32 vector bytes only; excludes Qdrant HNSW/payload/replicas',
@@ -116,6 +127,7 @@ def retrieve(index_id, image, k=10, deduplicate=True, exact=True, target='place'
             search_ms=(time.perf_counter()-start)*1000
         finally:
             client.close()
+    explanation_ms=0.
     seen=set()
     results=[]
     for p in points:
@@ -129,8 +141,31 @@ def retrieve(index_id, image, k=10, deduplicate=True, exact=True, target='place'
         results.append(dict(**payload,rank=len(results)+1,score=float(p.score),image_url='/api/ai/images/assets/'+payload['image_id']+'/content'))
         if len(results)>=k:
             break
+    if cfg.model=='handcrafted' and results:
+        start=time.perf_counter()
+        client=retrieval.qclient()
+        try:
+            stored=client.retrieve(index_id,ids=[str(uuid.UUID(r['image_id'])) for r in results],with_vectors=True,with_payload=False)
+        finally:
+            client.close()
+        lookup={str(p.id).replace('-',''):p.vector for p in stored}
+        for result in results:
+            if result['image_id'] in lookup:
+                result['feature_scores']=pa1.explain(vectors[0],lookup[result['image_id']],cfg.model_dump())
+        explanation_ms=(time.perf_counter()-start)*1000
+    # Resolve original place fields, preserving the image/place association.
+    from .. import database
+    datasets={meta['images'][r['image_id']].get('dataset_id') for r in results}
+    for dataset_id in datasets-{None,''}:
+        ids=[r['place_id'] for r in results if meta['images'][r['image_id']].get('dataset_id')==dataset_id]
+        with database.session(data.ROOT,data.db_path_override()) as conn:
+            places=conn.execute('SELECT place_id,address,category,description FROM places WHERE dataset_id=? AND place_id=ANY(?)',(dataset_id,ids)).fetchall()
+        lookup={p['place_id']:dict(p) for p in places}
+        for result in results:
+            if meta['images'][result['image_id']].get('dataset_id')==dataset_id:
+                result.update(lookup.get(result['place_id'],{}))
     return dict(index_id=index_id,model=cfg.model,score_type='Cosine Similarity',deduplicate=deduplicate,exact=exact,
-                results=results,timing=dict(model_loading_ms=loading_ms,**timing,search_ms=search_ms,total_ms=(time.perf_counter()-total)*1000),resources=retrieval.resources())
+                results=results,timing=dict(model_loading_ms=loading_ms,**timing,search_ms=search_ms,explanation_ms=explanation_ms,total_ms=(time.perf_counter()-total)*1000),resources=retrieval.resources())
 
 
 def search_bytes(index_id,raw,k=10,deduplicate=True,exact=True):
@@ -153,7 +188,8 @@ def delete_image(index_id,image_id):
         data.save('image_indexes',index_id,meta)
         client.delete(index_id,points_selector=qm.PointIdsList(points=[str(uuid.UUID(image_id))]),wait=True)
         meta['images'].pop(image_id,None)
-        meta.update(status=prior_status,gallery_sha256=data.digest(sorted(meta['images'])),updated_at=data.now(),vector_bytes=len(meta['images'])*(meta['dimension'] or 0)*4)
+        meta.update(status=prior_status if meta['images'] else 'empty',indexed_count=client.count(index_id,exact=True).count,
+                    gallery_sha256=data.digest(sorted(meta['images'])),updated_at=data.now(),vector_bytes=len(meta['images'])*(meta['dimension'] or 0)*4)
         data.save('image_indexes',index_id,meta)
     finally:
         client.close()

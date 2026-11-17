@@ -107,16 +107,29 @@ class ModelManager:
                 return 0.0
             self.unload()
             start = time.perf_counter()
-            from huggingface_hub import snapshot_download
+            from huggingface_hub import HfApi, snapshot_download
             from sentence_transformers import SentenceTransformer
             # Resolve a moving ref once, and pin every subsequent load to this commit.
-            path = snapshot_download(spec['model_id'], revision=config.revision,
-                                     allow_patterns=['config.json', 'config_sentence_transformers.json', 'modules.json',
+            patterns = ['config.json', 'config_sentence_transformers.json', 'modules.json',
                                                      'sentence_bert_config.json', 'tokenizer.json', 'tokenizer_config.json',
                                                      'special_tokens_map.json', 'added_tokens.json', 'vocab.txt',
                                                      'sentencepiece.bpe.model', 'spiece.model', 'model.safetensors',
                                                      'model-*.safetensors', 'model.safetensors.index.json',
-                                                     '1_Pooling/config.json', '2_Normalize/config.json'])
+                                                     '1_Pooling/config.json', '2_Normalize/config.json']
+            remote = HfApi().model_info(spec['model_id'], revision=config.revision)
+            if not any(f.rfilename.endswith('.safetensors') and '/' not in f.rfilename for f in remote.siblings):
+                patterns += ['pytorch_model.bin', 'pytorch_model-*.bin', 'pytorch_model.bin.index.json']
+            try:
+                path = snapshot_download(spec['model_id'], revision=remote.sha, allow_patterns=patterns)
+            except OSError as exc:
+                if getattr(exc, 'winerror', None) != 1314:
+                    raise
+                # Windows accounts may lack symlink privilege, including nested
+                # pooling files even when root files were downloaded successfully.
+                revision = remote.sha
+                path = snapshot_download(spec['model_id'], revision=revision, allow_patterns=patterns,
+                                         local_dir=data.ROOT / 'text_model_cache' / config.method / revision,
+                                         max_workers=1)
             resolved = os.path.basename(path)
             model = SentenceTransformer(path, device=config.device, trust_remote_code=False)
             model.max_seq_length = config.max_length or spec['max_length']

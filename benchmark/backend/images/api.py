@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from .. import data, jobs
-from . import benchmark, encoders, service, store
+from . import benchmark, encoders, service, store, features, pa1, importer, cnn
 
 log=logging.getLogger(__name__)
 router=APIRouter(prefix='/api/ai/images',tags=['Image-to-Image Search'])
@@ -58,10 +58,63 @@ def assets():
     return data.listing('image_assets')
 
 
+class SourceImport(BaseModel):
+    dataset_id:str
+    place_ids:list[str] | None=Field(default=None,min_length=1)
+    limit:int=Field(default=100,ge=1,le=10000)
+    all_images:bool=False
+
+
+@router.post('/import-source')
+def import_source(body:SourceImport):
+    dataset=data.get('datasets',body.dataset_id)
+    if dataset['kind']!='places':
+        raise ValueError('Cần dataset địa điểm')
+    if body.place_ids is not None and set(body.place_ids)-{p['place_id'] for p in dataset['records']}:
+        raise ValueError('place_id không thuộc dataset')
+    return submit('import',lambda job:importer.import_photos(body.dataset_id,body.place_ids,body.limit,body.all_images,job))
+
+
+@router.get('/imports')
+def source_imports():
+    return data.listing('image_imports')
+
+
+class FeatureRequest(BaseModel):
+    image_id:str
+    config:service.IndexConfig=Field(default_factory=service.IndexConfig)
+
+
+@router.post('/features')
+def extract_features(body:FeatureRequest):
+    data.get('image_assets',body.image_id)
+    return submit('features',lambda job:features.extract(body.image_id,body.config,job))
+
+
+@router.get('/features')
+def feature_history():
+    return [{k:v for k,v in f.items() if k!='vector'} for f in data.listing('image_features')]
+
+
+@router.get('/features/{key}')
+def feature_detail(key:str):
+    return data.get('image_features',key)
+
+
+@router.get('/indexes/{index_id}/vectors/{image_id}')
+def indexed_vector(index_id:str,image_id:str):
+    return features.indexed(index_id,image_id)
+
+
 @router.get('/assets/{image_id}/content')
 def content(image_id:str):
     data.get('image_assets',image_id)
     return FileResponse(data.ROOT/'image_blobs'/(image_id+'.png'),media_type='image/png')
+
+
+@router.get('/assets/{image_id}/pa1-preview')
+def pa1_preview(image_id:str,kind:str='gray'):
+    return Response(pa1.preview(store.load(image_id),kind),media_type='image/png',headers={'Cache-Control':'private, max-age=86400'})
 
 
 @router.post('/assets')
@@ -105,9 +158,47 @@ class ExistingIndex(BaseModel):
     config:service.IndexConfig=Field(default_factory=service.IndexConfig)
 
 
+class CNNRequest(BaseModel):
+    source_index_id:str
+    batch_size:int=Field(default=2,ge=1,le=16)
+
+
+@router.post('/cnn-indexes')
+def cnn_indexes(body:CNNRequest):
+    source=data.get('image_indexes',body.source_index_id)
+    selected=cnn.select_gallery(source)
+    return submit('cnn',lambda job:cnn.build(source,selected,body.batch_size,job))
+
+
 @router.post('/index-assets')
 def index_assets(body:ExistingIndex):
     return submit('index_assets',lambda job:service.index_images(body.config,body.image_ids,job))
+
+
+@router.post('/ablation')
+def index_pa1_ablation(body:ExistingIndex):
+    if body.config.model!='handcrafted':
+        raise ValueError('Ablation này chỉ áp dụng PA1')
+    if len(body.image_ids)!=len(set(body.image_ids)):
+        raise ValueError('Gallery có image_id trùng')
+    for key in body.image_ids:
+        if not data.get('image_assets',key)['place_id']:
+            raise ValueError('Gallery cần ảnh liên kết place_id')
+    def task(job):
+        results=[]
+        total=len(body.image_ids)*5
+        for stage in range(5):
+            class Progress:
+                def check(self):
+                    job.check()
+                def update(self,current,subtotal,message):
+                    job.update(stage*len(body.image_ids)+current,total,f'PA1 ablation {stage+1}/5 · {message}')
+            cfg=body.config.model_copy(update={'groups':encoders.GROUPS[:stage+1]})
+            result=service.index_images(cfg,body.image_ids,Progress())
+            results.append(dict(index_id=result['index_id'],added=result['added'],total=result['total'],groups=cfg.groups))
+            job.update((stage+1)*len(body.image_ids),total,f'Hoàn tất PA1 ablation {stage+1}/5')
+        return {'indexes':results}
+    return submit('ablation',task)
 
 
 @router.post('/search')

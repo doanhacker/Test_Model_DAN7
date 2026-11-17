@@ -5,6 +5,8 @@ import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import Mock
+from types import SimpleNamespace
 
 import numpy as np
 from backend import data, retrieval
@@ -17,6 +19,32 @@ class DummyJob:
         pass
     def update(self, *args):
         pass
+
+
+class CheckpointLoadingTests(unittest.TestCase):
+    def test_bin_checkpoint_and_windows_no_symlink_fallback(self):
+        import huggingface_hub
+        revision='a'*40
+        remote=SimpleNamespace(sha=revision,siblings=[SimpleNamespace(rfilename='pytorch_model.bin')])
+        model=Mock()
+        model.get_sentence_embedding_dimension.return_value=1024
+        model._modules={}
+        error=OSError('symlink privilege')
+        error.winerror=1314
+        modules={'sentence_transformers':SimpleNamespace(SentenceTransformer=Mock(return_value=model)),
+                 'sentence_transformers.models':SimpleNamespace(Normalize=type('Normalize',(),{})),
+                 'torch':SimpleNamespace(cuda=SimpleNamespace(is_available=lambda:False))}
+        with patch.dict('sys.modules',modules), patch.object(huggingface_hub,'HfApi') as api, patch.object(huggingface_hub,'snapshot_download',side_effect=[error,str(Path('cache')/revision)]) as download:
+            api.return_value.model_info.return_value=remote
+            manager=retrieval.ModelManager()
+            manager.load(retrieval.IndexConfig(dataset_id='test',method='M4',max_length=512))
+        first,second=download.call_args_list
+        self.assertIn('pytorch_model.bin',first.kwargs['allow_patterns'])
+        self.assertNotIn('sparse_linear.pt',first.kwargs['allow_patterns'])
+        self.assertEqual(first.kwargs['revision'],revision)
+        self.assertEqual(second.kwargs['local_dir'],data.ROOT/'text_model_cache'/'M4'/revision)
+        self.assertEqual(manager.info['revision'],revision)
+        self.assertEqual(model.max_seq_length,512)
 
 
 class RetrievalTests(unittest.TestCase):
